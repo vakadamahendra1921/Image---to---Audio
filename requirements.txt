@@ -1,0 +1,11 @@
+transformers
+tiktoken
+langchain 
+python-dotenv
+streamlit 
+gtts
+OpenAI 
+tensorflow
+openai-whisper
+googletrans
+#pip install -r requirements.txt
