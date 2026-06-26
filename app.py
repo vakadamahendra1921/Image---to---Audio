@@ -5,7 +5,14 @@ from gtts import gTTS
 import os
 from dotenv import find_dotenv, load_dotenv
 from openai import OpenAI
-from translate import Translator
+try:
+    from google_trans_new import google_translator
+except:
+    google_translator = None
+try:
+    from googletrans import Translator as GoogleTranslator
+except:
+    GoogleTranslator = None
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -168,35 +175,46 @@ the potential for wonder and insight. The world is filled with such moments - we
 
 # Function to translate text into a specified language
 def translate_text(text, language):
-    """Translate text to the specified language using LibreTranslate API"""
+    """Translate text to the specified language using multiple translation backends"""
     # For English, return text as-is
     if language == 'English' or language == 'en':
         return text
     
-    try:
-        # Get the language code
-        lang_code = LANGUAGE_CODES.get(language, 'en')
-        if lang_code == 'en':
-            return text
-        
-        print(f"🌐 Translating to {language} ({lang_code})...")
-        
-        # Create translator instance for the target language
-        translator = Translator(to_lang=lang_code)
-        
-        # Translate the text
-        translated = translator.translate(text)
-        
-        if translated and isinstance(translated, str):
-            print(f"✅ Translation successful!")
-            return translated
-        else:
-            print(f"⚠️ Translation failed, returning original text")
-            return text
-    
-    except Exception as e:
-        print(f"❌ Translation error for language {language}: {str(e)}")
+    # Get the language code
+    lang_code = LANGUAGE_CODES.get(language, 'en')
+    if lang_code == 'en':
         return text
+    
+    print(f"🌐 Translating {len(text)} characters to {language} ({lang_code})...")
+    
+    # Try Method 1: google-trans-new
+    if google_translator:
+        try:
+            print(f"  ➡️ Trying google-trans-new...")
+            translator = google_translator()
+            translated = translator.translate(text, lang_tgt=lang_code)
+            if translated and isinstance(translated, str) and len(translated) > 5:
+                print(f"  ✅ Success with google-trans-new!")
+                return translated
+        except Exception as e:
+            print(f"  ⚠️ google-trans-new failed: {str(e)}")
+    
+    # Try Method 2: googletrans
+    if GoogleTranslator:
+        try:
+            print(f"  ➡️ Trying googletrans...")
+            translator = GoogleTranslator()
+            result = translator.translate(text, src_language='en', target_language=lang_code)
+            translated = result['text'] if isinstance(result, dict) else result
+            if translated and isinstance(translated, str) and len(translated) > 5:
+                print(f"  ✅ Success with googletrans!")
+                return translated
+        except Exception as e:
+            print(f"  ⚠️ googletrans failed: {str(e)}")
+    
+    # Fallback: Return original English text
+    print(f"❌ All translation methods failed. Using English text.")
+    return text
 
 # Streamlit application
 def main():

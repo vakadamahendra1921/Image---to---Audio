@@ -8,4 +8,5 @@ OpenAI
 tensorflow
 openai-whisper
 googletrans
+google-trans-new
 #pip install -r requirements.txt
