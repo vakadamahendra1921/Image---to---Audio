@@ -5,5 +5,4 @@ Pillow
 gTTS
 requests
 python-dotenv
-openai
 deep-translator

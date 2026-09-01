@@ -7,7 +7,6 @@ import base64
 import requests
 import json
 from dotenv import find_dotenv, load_dotenv
-from openai import OpenAI
 from deep_translator import GoogleTranslator
 
 # Load environment variables
@@ -15,13 +14,9 @@ load_dotenv(find_dotenv())
 
 # Define API tokens
 HUGGINGFACEHUB_API_TOKEN = os.getenv('HUGGINGFACEHUB_API_TOKEN')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 if not GEMINI_API_KEY and hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-
-# Create OpenAI client (new API format)
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Language code mapping
 LANGUAGE_CODES = {
