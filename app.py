@@ -202,7 +202,10 @@ def main():
         bytes_data = uploaded_file.getvalue()
         with open(uploaded_file.name, "wb") as file:
             file.write(bytes_data)
-        st.sidebar.image(uploaded_file, caption='Uploaded Image.', use_column_width=True)
+        try:
+            st.sidebar.image(uploaded_file, caption='Uploaded Image.', use_container_width=True)
+        except TypeError:
+            st.sidebar.image(uploaded_file, caption='Uploaded Image.', use_column_width=True)
         
         # Process image with spinner
         with st.spinner("⏳ Processing your image..."):
