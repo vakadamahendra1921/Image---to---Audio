@@ -3,6 +3,9 @@ from PIL import Image
 import streamlit as st
 from gtts import gTTS
 import os
+import base64
+import requests
+import json
 from dotenv import find_dotenv, load_dotenv
 from openai import OpenAI
 from deep_translator import GoogleTranslator
@@ -10,9 +13,10 @@ from deep_translator import GoogleTranslator
 # Load environment variables
 load_dotenv(find_dotenv())
 
-# Define the Hugging Face Hub API Token and OpenAI API Key
+# Define API tokens
 HUGGINGFACEHUB_API_TOKEN = os.getenv('HUGGINGFACEHUB_API_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 
 # Create OpenAI client (new API format)
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -52,119 +56,103 @@ def img2text(image_path):
         print(f"Image file: {image_path}")
     return caption
 
-# Function to generate a story based on a scenario using OpenAI's GPT-3.5-turbo
-# MODIFIED: Using free version - caption becomes the story
-def generate_story(scenario):
-    # ℹ️ FREE VERSION: Creates completely unique stories based on actual image content
+# System prompt that enforces 100% original narrative storytelling
+STORY_PROMPT = """You are a creative fiction writer, not an image captioning tool.
+Generate a 100% ORIGINAL SHORT STORY inspired by this image — NOT a description of what is visible in it.
+
+STRICT RULES:
+1. DO NOT describe the image directly. Never state visible facts as-is (e.g., "a person is standing", "there is water", "kids are playing soccer"). Instead, TRANSFORM visual details into narrative story elements — turn clothing, poses, expressions, lighting, and settings into clues about character motives, internal tension, or pivotal life decisions.
+2. The output MUST contain all five story elements:
+   - A NAMED character (with age and a hint of backstory)
+   - A SPECIFIC setting (place, time of day, atmosphere inferred from the visual details)
+   - A CONFLICT or TENSION (something the character wants, fears, or is deciding)
+   - An EVENT or ACTION that happens in the scene (something changes or is about to change)
+   - A RESOLUTION or TURN at the end (a meaningful, open-ended conclusion)
+3. PHYSICAL ACCURACY LOCK: Any visible physical trait you incorporate — hair style/texture (e.g. braided pigtails, high curly puff), clothing color/type, body position, facial expression, and accessories — MUST match the image with 100% precision. Do not alter visible colors or invent absent features (e.g., no invented crowds, no fireworks, no artificial weather).
+4. ANTI-TEMPLATE RULE: Every sentence must be unique to this specific image and grounded strictly in its visual reality. DO NOT use generic philosophical filler ("this captures the human condition", "carries a universe within them", etc.).
+5. Length & Structure: EXACTLY 30 lines. Each line must be a short, complete narrative beat (one single sentence per line) with a newline after each line. Tight, vivid, and specific.
+6. Point of view: third-person limited, past tense.
+7. Output Format: Provide ONLY the 30 lines of story text. Do not write any preamble, intro labels, numbering, visual cue lists, or disclaimers. Begin the story directly on line one.
+"""
+
+def generate_story_with_gemini(image_path, api_key):
+    """Generate a 100% original narrative story directly from the image using Google Gemini Vision API."""
+    try:
+        import io
+        # Optimize image size before base64 encoding to make network transmission ultra-fast
+        img = Image.open(image_path).convert('RGB')
+        img.thumbnail((1024, 1024))
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=85)
+        b64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        mime_type = "image/jpeg"
+        
+        # Call Gemini 3.6 Flash via REST API
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key.strip()}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": STORY_PROMPT},
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": b64_image
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.75,
+                "maxOutputTokens": 8192
+            }
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        data = resp.json()
+        
+        if "candidates" in data and len(data["candidates"]) > 0:
+            candidate = data["candidates"][0]
+            parts = candidate.get("content", {}).get("parts", [])
+            if parts and "text" in parts[0]:
+                story_text = parts[0]["text"].strip()
+                return story_text, None
+        
+        if "error" in data:
+            error_msg = data["error"].get("message", str(data["error"]))
+            return None, error_msg
+            
+        return None, "No story candidate returned by Gemini."
+    except Exception as e:
+        return None, str(e)
+
+def generate_story(scenario, image_path=None, api_key=None):
+    """Generate a 100% original narrative story.
+    Uses Google Gemini Vision if an API key is available, or provides a fallback narrative story."""
+    active_key = api_key or os.getenv('GEMINI_API_KEY', '')
     
-    scenario_lower = scenario.lower()
+    if active_key and image_path and os.path.exists(image_path):
+        print(f"Generating 100% original story with Google Gemini Vision for {image_path}...")
+        story, err = generate_story_with_gemini(image_path, active_key)
+        if story:
+            print("Gemini Story generated successfully!\n")
+            return story, "gemini"
+        else:
+            print(f"Gemini API failed: {err}")
+            st.error(f"Gemini API Notice: {err}")
     
-    # Story templates for different types of images - each is unique and detailed
+    # Narrative fallback with character, conflict, and resolution instead of dry commentary
+    story = f"""The afternoon light slanted across the ground as Maya stepped into the scene of {scenario}. 
+For months, she had hesitated to return to this place, weighed down by memories of what she had left behind. 
+The quiet tension in the air was palpable, every subtle shift around her demanding a choice she was not yet ready to make.
+
+Taking a slow breath, Maya reached out and made her decision, shifting her stance to meet the moment directly. 
+The uncertainty that had held her back for so long seemed to dissolve, replaced by a sudden clarity. 
+As she moved forward, the path ahead was finally clear, and she knew there was no going back."""
     
-    # FIREWORKS/CELEBRATION/SKY/FIRE stories
-    if any(word in scenario_lower for word in ['fire', 'fireworks', 'explosion', 'light', 'bright', 'sky', 'night']):
-        story = f"""Scene One: {scenario}
-
-Above us, {scenario} paints the darkness with brilliant colors. The moment is electrifying - explosive bursts 
-of light pierce through the night sky in unexpected patterns. Each burst tells a story of celebration, of joy, 
-of human spirit reaching upward to touch the heavens. The warmth and energy radiate downward, illuminating the 
-faces of those watching below, connecting strangers in shared wonder.
-
-The choreography of light is both wild and deliberate. Timing, precision, and raw power combine to create 
-something that exists for only moments, yet leaves lasting impressions in memory and heart. The sound and light 
-work in harmony - a sensory explosion that reminds us of the beauty that comes from controlled chaos.
-
-This moment of brilliance stands as a celebration of life itself. It reminds us that beauty often comes in 
-unexpected flashes, that moments of pure joy are worth cherishing, and that sometimes we need to pause and 
-simply look upward to find magic."""
-    
-    # PEOPLE/PERSON/HUMAN stories
-    elif any(word in scenario_lower for word in ['person', 'people', 'man', 'woman', 'child', 'kid', 'boy', 'girl', 'face', 'human', 'astronaut']):
-        story = f"""Scene One: {scenario}
-
-Before us stands {scenario}. This is more than just a presence - it is a story of individuality, purpose, and 
-human experience. The person or people we observe carry with them invisible narratives of their lives, dreams, 
-struggles, and achievements. Every detail visible - from posture to expression - speaks volumes about their 
-character and spirit.
-
-What makes this moment remarkable is the intersection of the individual with their environment. Whether brave, 
-playful, thoughtful, or determined, the human element transforms ordinary scenes into something deeply meaningful. 
-The connection between being and space creates a profound sense of presence.
-
-This scene is a window into the human condition. It celebrates the diversity, resilience, and beauty of humanity. 
-Each person we encounter carries universes within them, and in this captured moment, we're invited to witness 
-and appreciate the profound complexity of human existence."""
-    
-    # ANIMALS/NATURE/WILDLIFE stories
-    elif any(word in scenario_lower for word in ['animal', 'dog', 'cat', 'bird', 'wildlife', 'creature', 'nature', 'forest', 'landscape', 'mountain', 'tree']):
-        story = f"""Scene One: {scenario}
-
-In nature's domain, we witness {scenario}. This is a scene of raw authenticity and unbridled existence. 
-The natural world operates by its own ancient rules, indifferent to human concerns, following rhythms that 
-predate civilization. Here, survival, adaptation, and evolution are written in every movement and form.
-
-What we observe speaks to the intricate balance of ecosystems and the profound beauty of creation. Whether 
-it's the grace of movement, the patterns of growth, or the raw power of natural forces, there is an honesty 
-here that human constructs often lack. The colors, textures, and forms are born from millions of years of 
-refinement.
-
-This moment connects us to something larger than ourselves - to the web of life that sustains all existence. 
-It reminds us that we are part of nature, not separate from it. The beauty we witness here is both humbling 
-and inspiring, a testament to the magnificent creativity of the natural world."""
-    
-    # CITY/URBAN/ARCHITECTURE stories
-    elif any(word in scenario_lower for word in ['city', 'building', 'street', 'urban', 'crowd', 'light', 'night', 'window']):
-        story = f"""Scene One: {scenario}
-
-The urban landscape reveals itself in {scenario}. Cities are living organisms - pulsing with the energy of 
-millions of lives intersecting and interconnecting. The architecture, the lights, the density of human presence 
-all converge to create complex ecosystems of activity, commerce, culture, and dreams.
-
-This scene captures the essence of human civilization. It shows how we build, how we create spaces for living, 
-working, and celebrating. The interplay of light and shadow, the geometry of structures, and the hidden stories 
-within each window and doorway speak to the ambitions and aspirations of countless people. The city is a canvas 
-painted by human hands and human hearts.
-
-In moments like this, we recognize that cities are more than concrete and steel - they are monuments to human 
-creativity, resilience, and the endless possibility of connection. Every light represents lives, every structure 
-represents achievement, and together they form the backdrop to countless human dramas and triumphs."""
-    
-    # WATER/OCEAN/LIQUID stories
-    elif any(word in scenario_lower for word in ['water', 'ocean', 'sea', 'river', 'wave', 'lake', 'rain', 'wet']):
-        story = f"""Scene One: {scenario}
-
-Water surrounds our attention in {scenario}. Since the dawn of time, water has been the source of life, 
-the mover of civilizations, and the shaper of landscapes. What we witness here demonstrates water's dual nature 
-- both gentle and powerful, both nourishing and overwhelming, both transparent and mysterious.
-
-The movement of water speaks to constant change and transformation. Waves rise and fall, currents flow in hidden 
-directions, and the surface reflects light in ever-changing patterns. There is a rhythm here that predates human 
-existence and will continue long after. Water has its own wisdom, earned through eons of flowing, shaping, and 
-adapting.
-
-This scene is a meditation on flow, transformation, and the essential nature of life itself. Water reminds us 
-that everything moves, everything changes, and yet there is continuity in this perpetual motion. To observe water 
-is to contemplate the deeper currents of existence itself."""
-    
-    # DEFAULT - Generic but detailed story
-    else:
-        story = f"""Scene One: {scenario}
-
-In this captured moment, we observe {scenario}. The scene before us is layered with meaning - every element 
-positioned, every light source creating dimension, every detail combining to form a complete visual narrative. 
-This is not random; it is a composition worthy of our attention and contemplation.
-
-What makes this moment significant is the convergence of multiple elements working in harmony. The foreground 
-draws our eyes, the background provides context, and the middle ground connects them all. Colors interact with 
-light, shapes create rhythm, and the overall composition speaks a language that transcends words. This is visual 
-storytelling at its finest.
-
-This moment stands as a perfect example of how extraordinary beauty exists all around us, waiting to be noticed 
-and appreciated. It reminds us to pause, to observe deeply, and to recognize that each moment we encounter offers 
-the potential for wonder and insight. The world is filled with such moments - we need only open our eyes to see them."""
-    
-    print(story)
-    return story
+    return story, "fallback"
 
 # Function to translate text into a specified language
 def translate_text(text, language):
@@ -179,23 +167,23 @@ def translate_text(text, language):
         return text
     
     try:
-        print(f"\n🌐 Translating {len(text)} characters to {language} ({lang_code})...")
+        print(f"\nTranslating {len(text)} characters to {language} ({lang_code})...")
         
         # Use deep-translator with Google Translate backend
         translator = GoogleTranslator(source='en', target=lang_code)
         translated = translator.translate(text)
         
         if translated and isinstance(translated, str) and len(translated) > 5:
-            print(f"✅ Translation successful! ({len(translated)} characters)")
+            print(f"Translation successful! ({len(translated)} characters)")
             print(f"   First 100 chars: {translated[:100]}...")
             return translated
         else:
-            print(f"⚠️ Translation returned invalid result, using English text")
+            print(f"Translation returned invalid result, using English text")
             return text
     
     except Exception as e:
-        print(f"❌ Translation error for {language}: {str(e)}")
-        print(f"⚠️ Using original English text as fallback")
+        print(f"Translation error for {language}: {str(e)}")
+        print(f"Using original English text as fallback")
         return text
 
 # Streamlit application
@@ -207,11 +195,11 @@ def main():
 
     st.markdown("<h1 style='text-align: center; margin-top: -30px;'>Transform Images to Audio Stories 🖼️➡️🔊</h1>", unsafe_allow_html=True)
     
-    # Info banner
-    st.info("✨ **FREE VERSION**: Uses AI vision + text-to-speech. Upgrade to unlock GPT story generation!")
+    gemini_key = os.getenv('GEMINI_API_KEY', '')
 
+    # Sidebar controls
     st.sidebar.title("🎨 Upload Your Image!")
-    uploaded_file = st.sidebar.file_uploader("Choose an image...", type="jpg")
+    uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png", "webp"])
 
     if uploaded_file is not None:
         bytes_data = uploaded_file.getvalue()
@@ -245,9 +233,9 @@ def main():
         print(f"Original Caption: {scenario}")
         print(f"Translated Caption: {translated_scenario}\n")
         
-        # Generate story from translated caption
-        with st.spinner("📖 Generating story..."):
-            story = generate_story(translated_scenario)
+        # Generate story directly from image with Gemini Vision
+        with st.spinner("📖 Writing 100% original story..."):
+            story, engine = generate_story(scenario, image_path=uploaded_file.name, api_key=gemini_key)
         
         # Translate the full story
         with st.spinner("🌍 Translating story..."):
@@ -263,9 +251,13 @@ def main():
                 st.info(f"📝 **{language}:** {translated_scenario}")
         
         with col2:
-            with st.expander("📖 Generated Story"):
+            with st.expander("📖 Generated Story", expanded=True):
                 st.write(f"**Story in {language}:**")
-                st.info(translated_story)
+                
+                # Clean and space each line for clear reading
+                formatted_lines = [line.strip() for line in translated_story.split("\n") if line.strip()]
+                clean_story = "\n\n".join(formatted_lines)
+                st.markdown(clean_story)
 
         st.write("---")
         st.subheader("🎵 Audio Story")
