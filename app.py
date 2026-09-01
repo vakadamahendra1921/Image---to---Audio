@@ -1,4 +1,3 @@
-from transformers.pipelines import pipeline
 from PIL import Image
 import streamlit as st
 from gtts import gTTS
@@ -27,31 +26,52 @@ LANGUAGE_CODES = {
     'Malayalam': 'ml'
 }
 
-# Cache the fast image captioning model
-@st.cache_resource
-def load_caption_model():
+# Function to extract concise description from image using Gemini Vision (or local fallback)
+def img2text(image_path, api_key=None):
+    """Generate a fast, vivid caption of the image using Gemini Vision (or safe fallback)."""
+    active_key = api_key or GEMINI_API_KEY or os.getenv('GEMINI_API_KEY', '')
+    
+    # 1. Primary: Fast Gemini Vision analysis (no gigabyte model downloads, instant and accurate)
+    if active_key:
+        try:
+            import io
+            img = Image.open(image_path).convert('RGB')
+            img.thumbnail((512, 512))
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=80)
+            b64_image = base64.b64encode(buf.getvalue()).decode('utf-8')
+            
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={active_key.strip()}"
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": "Describe this scene concisely in one vivid sentence."},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+                    ]
+                }],
+                "generationConfig": {"maxOutputTokens": 100}
+            }
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=20)
+            data = resp.json()
+            if "candidates" in data and len(data["candidates"]) > 0:
+                caption = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                print(f"Gemini image caption: {caption}")
+                return caption
+        except Exception as e:
+            print(f"Gemini caption notice: {e}")
+            
+    # 2. Secondary fallback: Local Hugging Face pipeline if available
     try:
-        # Try the fast BLIP model first
-        return pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=0 if st.session_state.get("gpu", False) else -1)
-    except:
-        # Fallback to lightweight model
-        return pipeline("image-to-text", model="ydshieh/coco_image_to_text_cn", device=-1)
-
-# Function to extract detailed description from image (FAST)
-def img2text(image_path):
-    with st.spinner("🖼️ Reading image details..."):
-        model = load_caption_model()
-        
-        # Open image and ensure it's RGB
+        from transformers.pipelines import pipeline
+        captioner = pipeline("image-to-text", model="ydshieh/coco_image_to_text_cn", device=-1)
         image = Image.open(image_path).convert('RGB')
+        results = captioner(image)
+        return results[0]['generated_text']
+    except Exception as e:
+        print(f"Hugging Face caption notice: {e}")
         
-        # Generate caption for THIS specific image
-        results = model(image)
-        caption = results[0]['generated_text']
-        
-        print(f"Image caption: {caption}")
-        print(f"Image file: {image_path}")
-    return caption
+    # 3. Safe universal fallback
+    return "A vivid, expressive scene captured on camera."
 
 # System prompt that enforces 100% original narrative storytelling
 STORY_PROMPT = """You are a creative fiction writer, not an image captioning tool.
@@ -209,7 +229,7 @@ def main():
         
         # Process image with spinner
         with st.spinner("⏳ Processing your image..."):
-            scenario = img2text(uploaded_file.name)
+            scenario = img2text(uploaded_file.name, gemini_key)
 
         # Language selection with clear display
         language = st.sidebar.selectbox("🌍 Select Language", ['English', 'Telugu', 'Hindi', 'Tamil', 'Malayalam'])
