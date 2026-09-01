@@ -26,12 +26,21 @@ LANGUAGE_CODES = {
     'Malayalam': 'ml'
 }
 
+# Priority list of Gemini Flash vision models for zero-downtime fallback
+GEMINI_VISION_MODELS = [
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview"
+]
+
 # Function to extract concise description from image using Gemini Vision (or local fallback)
 def img2text(image_path, api_key=None):
     """Generate a fast, vivid caption of the image using Gemini Vision (or safe fallback)."""
     active_key = api_key or GEMINI_API_KEY or os.getenv('GEMINI_API_KEY', '')
     
-    # 1. Primary: Fast Gemini Vision analysis (no gigabyte model downloads, instant and accurate)
+    # 1. Primary: Fast Gemini Vision analysis with automatic multi-model failover
     if active_key:
         try:
             import io
@@ -41,7 +50,6 @@ def img2text(image_path, api_key=None):
             img.save(buf, format='JPEG', quality=80)
             b64_image = base64.b64encode(buf.getvalue()).decode('utf-8')
             
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={active_key.strip()}"
             payload = {
                 "contents": [{
                     "parts": [
@@ -51,12 +59,18 @@ def img2text(image_path, api_key=None):
                 }],
                 "generationConfig": {"maxOutputTokens": 100}
             }
-            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=20)
-            data = resp.json()
-            if "candidates" in data and len(data["candidates"]) > 0:
-                caption = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                print(f"Gemini image caption: {caption}")
-                return caption
+            
+            for model_name in GEMINI_VISION_MODELS:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={active_key.strip()}"
+                    resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=15)
+                    data = resp.json()
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        caption = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        print(f"Gemini ({model_name}) image caption: {caption}")
+                        return caption
+                except Exception:
+                    continue
         except Exception as e:
             print(f"Gemini caption notice: {e}")
             
@@ -127,21 +141,33 @@ def generate_story_with_gemini(image_path, api_key):
         }
         
         headers = {"Content-Type": "application/json"}
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        data = resp.json()
+        last_err = None
         
-        if "candidates" in data and len(data["candidates"]) > 0:
-            candidate = data["candidates"][0]
-            parts = candidate.get("content", {}).get("parts", [])
-            if parts and "text" in parts[0]:
-                story_text = parts[0]["text"].strip()
-                return story_text, None
-        
-        if "error" in data:
-            error_msg = data["error"].get("message", str(data["error"]))
-            return None, error_msg
-            
-        return None, "No story candidate returned by Gemini."
+        # Try each reliable model in priority order to guarantee zero downtime
+        for model_name in GEMINI_VISION_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                data = resp.json()
+                
+                if "candidates" in data and len(data["candidates"]) > 0:
+                    candidate = data["candidates"][0]
+                    parts = candidate.get("content", {}).get("parts", [])
+                    if parts and "text" in parts[0]:
+                        story_text = parts[0]["text"].strip()
+                        print(f"Story generated successfully using {model_name}!")
+                        return story_text, None
+                
+                if "error" in data:
+                    last_err = data["error"].get("message", str(data["error"]))
+                    print(f"Model {model_name} busy: {last_err}. Switching to alternate model...")
+                    continue
+            except Exception as e:
+                last_err = str(e)
+                print(f"Model {model_name} network timeout, switching to next...")
+                continue
+                
+        return None, last_err or "All Gemini models are busy. Please try again in a moment."
     except Exception as e:
         return None, str(e)
 
