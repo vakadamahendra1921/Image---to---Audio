@@ -67,10 +67,43 @@ def img2text(image_path, api_key=None):
                     data = resp.json()
                     if "candidates" in data and len(data["candidates"]) > 0:
                         caption = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        print(f"Gemini ({model_name}) image caption: {caption}")
-                        return caption
+                        # Reject trivially short or incomplete captions (e.g. "A", "The", "An image")
+                        if len(caption) >= 10 and len(caption.split()) >= 3:
+                            print(f"Gemini ({model_name}) image caption: {caption}")
+                            return caption
+                        else:
+                            print(f"Gemini ({model_name}) returned too-short caption '{caption}', retrying with next model...")
                 except Exception:
                     continue
+
+            # 1b. Second-pass retry with a more explicit prompt if all models gave bad captions
+            print("All models gave short captions on first pass — retrying with explicit prompt...")
+            explicit_payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": (
+                            "Look carefully at this image and write exactly one complete, descriptive sentence "
+                            "(at least 10 words) that captures the main subject, setting, and mood. "
+                            "Do not write a fragment or a single word."
+                        )},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+                    ]
+                }],
+                "generationConfig": {"maxOutputTokens": 150}
+            }
+            for model_name in GEMINI_VISION_MODELS:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={active_key.strip()}"
+                    resp = requests.post(url, headers={"Content-Type": "application/json"}, json=explicit_payload, timeout=15)
+                    data = resp.json()
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        caption = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if len(caption) >= 10 and len(caption.split()) >= 3:
+                            print(f"Gemini ({model_name}) retry caption: {caption}")
+                            return caption
+                except Exception:
+                    continue
+
         except Exception as e:
             print(f"Gemini caption notice: {e}")
             
@@ -155,8 +188,13 @@ def generate_story_with_gemini(image_path, api_key):
                     parts = candidate.get("content", {}).get("parts", [])
                     if parts and "text" in parts[0]:
                         story_text = parts[0]["text"].strip()
-                        print(f"Story generated successfully using {model_name}!")
-                        return story_text, None
+                        # Reject suspiciously short stories (truncated/failed generation)
+                        if len([l for l in story_text.split("\n") if l.strip()]) >= 5:
+                            print(f"Story generated successfully using {model_name}!")
+                            return story_text, None
+                        else:
+                            print(f"Model {model_name} returned too-short story ({len(story_text)} chars), trying next model...")
+                            continue
                 
                 if "error" in data:
                     last_err = data["error"].get("message", str(data["error"]))
@@ -199,35 +237,105 @@ As she moved forward, the path ahead was finally clear, and she knew there was n
 
 # Function to translate text into a specified language
 def translate_text(text, language):
-    """Translate text to the specified language using deep-translator"""
+    """Translate text to the specified language.
+    Primary: Gemini API (already available, no rate limit issues).
+    Fallback: deep-translator (Google free tier, rate limited).
+    Last resort: return original English text."""
+    import time
+
     # For English, return text as-is
     if language == 'English' or language == 'en':
         return text
-    
-    # Get the language code
+
     lang_code = LANGUAGE_CODES.get(language, 'en')
     if lang_code == 'en':
         return text
-    
+
+    print(f"\nTranslating {len(text)} characters to {language} ({lang_code})...")
+
+    # ── Primary: Use Gemini API for translation (no rate limit, already have key) ──
+    active_key = GEMINI_API_KEY or os.getenv('GEMINI_API_KEY', '')
+    if active_key:
+        for model_name in GEMINI_VISION_MODELS:
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={active_key.strip()}"
+                payload = {
+                    "contents": [{"parts": [{"text": (
+                        f"Translate the following text to {language}. "
+                        f"Output ONLY the translated text with absolutely no extra commentary, "
+                        f"labels, quotes, explanations, or formatting. Just the plain translation:\n\n{text}"
+                    )}]}],
+                    "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.1}
+                }
+                resp = requests.post(url, headers={"Content-Type": "application/json"},
+                                     json=payload, timeout=60)
+                data = resp.json()
+                if "candidates" in data and data["candidates"]:
+                    translated = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if translated and len(translated) > 5:
+                        print(f"Gemini translation ({model_name}) successful! ({len(translated)} chars)")
+                        return translated
+            except Exception as e:
+                print(f"Gemini translation model {model_name} failed: {e}, trying next...")
+                continue
+
+    # ── Fallback: deep-translator with retry back-off ──
+    print("Gemini translation unavailable, falling back to deep-translator...")
+    for attempt in range(3):
+        try:
+            translator = GoogleTranslator(source='en', target=lang_code)
+            translated = translator.translate(text)
+            if translated and isinstance(translated, str) and len(translated) > 5:
+                print(f"deep-translator successful on attempt {attempt+1}! ({len(translated)} chars)")
+                return translated
+        except Exception as e:
+            wait = 2 ** (attempt + 1)
+            print(f"deep-translator error attempt {attempt+1}: {e}")
+            if attempt < 2:
+                print(f"  Waiting {wait}s before retry...")
+                time.sleep(wait)
+
+    # ── Last resort: return English ──
+    print("All translation methods failed. Returning English text.")
+    return text
+
+# --- Cached wrappers so language changes don't re-trigger expensive API calls ---
+
+@st.cache_data(show_spinner=False)
+def _cached_img2text(image_bytes: bytes, filename: str, api_key: str) -> str:
+    """Cache image captioning per (image content, api_key).
+    Re-runs only when a new image is uploaded, not when language changes."""
+    import tempfile
+    ext = os.path.splitext(filename)[-1] or ".jpg"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(image_bytes)
+        tmp_path = tmp.name
     try:
-        print(f"\nTranslating {len(text)} characters to {language} ({lang_code})...")
-        
-        # Use deep-translator with Google Translate backend
-        translator = GoogleTranslator(source='en', target=lang_code)
-        translated = translator.translate(text)
-        
-        if translated and isinstance(translated, str) and len(translated) > 5:
-            print(f"Translation successful! ({len(translated)} characters)")
-            print(f"   First 100 chars: {translated[:100]}...")
-            return translated
-        else:
-            print(f"Translation returned invalid result, using English text")
-            return text
-    
-    except Exception as e:
-        print(f"Translation error for {language}: {str(e)}")
-        print(f"Using original English text as fallback")
-        return text
+        return img2text(tmp_path, api_key)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+@st.cache_data(show_spinner=False)
+def _cached_generate_story(scenario: str, image_bytes: bytes, filename: str, api_key: str):
+    """Cache story generation per (scenario, image content, api_key).
+    Re-runs only when a new image is uploaded, not when language changes."""
+    import tempfile
+    ext = os.path.splitext(filename)[-1] or ".jpg"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(image_bytes)
+        tmp_path = tmp.name
+    try:
+        return generate_story(scenario, image_path=tmp_path, api_key=api_key)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
 
 # Streamlit application
 def main():
@@ -237,69 +345,79 @@ def main():
     )
 
     st.markdown("<h1 style='text-align: center; margin-top: -30px;'>Transform Images to Audio Stories 🖼️➡️🔊</h1>", unsafe_allow_html=True)
-    
-    gemini_key = os.getenv('GEMINI_API_KEY', '')
 
     # Sidebar controls
     st.sidebar.title("🎨 Upload Your Image!")
+    gemini_key = os.getenv('GEMINI_API_KEY', '')
+    if not gemini_key and hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+        gemini_key = st.secrets["GEMINI_API_KEY"]
+
     uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png", "webp"])
 
     if uploaded_file is not None:
         bytes_data = uploaded_file.getvalue()
-        with open(uploaded_file.name, "wb") as file:
-            file.write(bytes_data)
+
+        # Save with a unique hash-based filename to prevent overwriting when
+        # two images have the same filename (e.g. both named "photo.jpg")
+        import hashlib
+        file_hash = hashlib.md5(bytes_data).hexdigest()[:12]
+        ext = os.path.splitext(uploaded_file.name)[-1] or ".jpg"
+        uploads_dir = os.path.join(os.getcwd(), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        save_path = os.path.join(uploads_dir, f"{file_hash}{ext}")
+        with open(save_path, "wb") as f:
+            f.write(bytes_data)
         try:
             st.sidebar.image(uploaded_file, caption='Uploaded Image.', use_container_width=True)
         except TypeError:
             st.sidebar.image(uploaded_file, caption='Uploaded Image.', use_column_width=True)
-        
-        # Process image with spinner
-        with st.spinner("⏳ Processing your image..."):
-            scenario = img2text(uploaded_file.name, gemini_key)
 
-        # Language selection with clear display
+        # Language selection — placed here so its value is available before heavy processing
         language = st.sidebar.selectbox("🌍 Select Language", ['English', 'Telugu', 'Hindi', 'Tamil', 'Malayalam'])
-        
+
         # Get TTS language code
         tts_lang = LANGUAGE_CODES.get(language, 'en')
-        
-        # Translate caption and story
+
+        # ── Heavy work: cached so language changes don't re-trigger these ──────
+        with st.spinner("⏳ Processing your image..."):
+            scenario = _cached_img2text(bytes_data, uploaded_file.name, gemini_key)
+
+        with st.spinner("📖 Writing 100% original story..."):
+            story, engine = _cached_generate_story(scenario, bytes_data, uploaded_file.name, gemini_key)
+        # ─────────────────────────────────────────────────────────────────────
+
         print(f"\n{'='*60}")
         print(f"Selected Language: {language}")
         print(f"Language Code: {tts_lang}")
         print(f"{'='*60}\n")
-        
+
         st.write("---")
         st.markdown(f"### 🌐 **Language Selected: {language}** 🌐")
         st.write("")
-        
-        # Translate the caption
+
+        # ── Cheap work: translation re-runs on every language change ──────────
         with st.spinner("🌍 Translating caption..."):
             translated_scenario = translate_text(scenario, language)
         print(f"Original Caption: {scenario}")
         print(f"Translated Caption: {translated_scenario}\n")
-        
-        # Generate story directly from image with Gemini Vision
-        with st.spinner("📖 Writing 100% original story..."):
-            story, engine = generate_story(scenario, image_path=uploaded_file.name, api_key=gemini_key)
-        
-        # Translate the full story
+
         with st.spinner("🌍 Translating story..."):
             translated_story = translate_text(story, language)
         print(f"Original Story:\n{story}")
         print(f"\nTranslated Story:\n{translated_story}\n")
-        
+        # ─────────────────────────────────────────────────────────────────────
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
             with st.expander("📸 Image Analysis"):
                 st.write("**AI Vision Analysis:**")
                 st.info(f"📝 **{language}:** {translated_scenario}")
-        
+
         with col2:
             with st.expander("📖 Generated Story", expanded=True):
                 st.write(f"**Story in {language}:**")
-                
+
                 # Clean and space each line for clear reading
                 formatted_lines = [line.strip() for line in translated_story.split("\n") if line.strip()]
                 clean_story = "\n\n".join(formatted_lines)
@@ -307,13 +425,13 @@ def main():
 
         st.write("---")
         st.subheader("🎵 Audio Story")
-        
+
         try:
             with st.spinner(f"🎤 Generating audio in {language}..."):
                 tts = gTTS(text=translated_story, lang=tts_lang, slow=False)
                 tts.save('audio.mp3')
-                audio_file = open('audio.mp3', 'rb')
-                audio_bytes = audio_file.read()
+                with open('audio.mp3', 'rb') as audio_file:
+                    audio_bytes = audio_file.read()
             st.audio(audio_bytes, format="audio/mp3")
             st.success(f"✅ Audio generated successfully in {language}!")
         except Exception as e:
